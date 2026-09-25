@@ -15,6 +15,7 @@ Run flow:
 from __future__ import annotations
 
 import configparser
+import functools
 import io
 import json
 import os
@@ -305,6 +306,29 @@ def _tail_terminal_log(lines=20):
 TESTER_PROCESS_NAMES = frozenset({"terminal64.exe", "metatester64.exe"})
 
 
+def _normalize_path(path):
+    return path.replace("\\", "/").lower().rstrip("/")
+
+
+@functools.lru_cache(maxsize=8)
+def _terminal_dir_forms(terminal_dir):
+    """Every spelling of ``terminal_dir`` a process's exe path can come back as.
+
+    In the VM, ``Desktop\\Shared`` is a link to ``\\\\host.lan\\Data`` and Windows
+    reports a process's image by its resolved path, so a terminal launched as
+    ``C:\\Users\\Docker\\Desktop\\Shared\\terminals\\...`` shows up as
+    ``\\\\host.lan\\Data\\terminals\\...``. Matching only the configured spelling
+    found nothing: the self-relaunch wait never fired and the timeout and
+    startup cleanups killed nothing.
+    """
+    forms = {_normalize_path(terminal_dir)}
+    try:
+        forms.add(_normalize_path(os.path.realpath(terminal_dir)))
+    except (OSError, ValueError):
+        pass
+    return frozenset(forms)
+
+
 def _in_terminal_dir(exe):
     """True when ``exe`` lives inside THIS terminal directory.
 
@@ -313,9 +337,11 @@ def _in_terminal_dir(exe):
     """
     if not exe:
         return False
-    base = TERMINAL_DIR.replace("\\", "/").lower().rstrip("/")
-    path = exe.replace("\\", "/").lower().rstrip("/")
-    return path == base or path.startswith(base + "/")
+    path = _normalize_path(exe)
+    return any(
+        path == base or path.startswith(base + "/")
+        for base in _terminal_dir_forms(TERMINAL_DIR)
+    )
 
 
 def _terminal_processes(names=TESTER_PROCESS_NAMES):
