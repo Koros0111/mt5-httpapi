@@ -15,7 +15,8 @@ Find symbols, inspect the contract details that brokers love making weird, pull 
 
 | Method | Endpoint                 | Description                               |
 | ------ | ------------------------ | ----------------------------------------- |
-| GET    | `/symbols`               | List symbols (`?group=*USD*`)             |
+| GET    | `/symbols`               | List symbols (`?group=*USD*`). **Refused with 409 on a `mode: backtest` terminal** — it never attaches the SDK; see below. |
+| POST   | `/symbols/import`        | Prime the symbol cache from a JSON body without touching the SDK — the safe path on a `mode: backtest` terminal. |
 | GET    | `/symbols/:symbol`       | Symbol details                            |
 | GET    | `/symbols/:symbol/tick`  | Latest tick                               |
 | GET    | `/symbols/:symbol/rates` | OHLCV candles (`?timeframe=H1&count=100`, `?timeframe=H1&from=<unix>&count=-100`, or `?timeframe=H1&from=<unix>&to=<unix>`) |
@@ -27,6 +28,66 @@ Find symbols, inspect the contract details that brokers love making weird, pull 
 ```json
 ["EURUSD", "GBPUSD", "ADAUSD", "BTCUSD", "..."]
 ```
+
+On success (unfiltered, i.e. no `?group=`) this also persists the list to that
+terminal's symbol cache, which the backtest INI builder reads to decide
+whether a broker's `symbol_suffix` applies (see [Backtesting](backtesting.md)).
+`GET /symbols` calls the MT5 SDK, so on a `mode: backtest` terminal — which
+never attaches the SDK — it is refused with 409 instead of triggering a full
+`mt5.initialize()` that would spawn `terminal64.exe` and hold the tester's
+single-instance lock, leaving the next backtest run with an empty report.
+
+**POST `/symbols/import`** — prime a terminal's symbol cache directly, with no
+MT5 SDK call at all. This is the only supported way to prime a `mode: backtest`
+terminal: get the list from a live terminal on the same broker/account (`GET
+/symbols` there) or from the broker's own documentation, then post it here.
+
+```bash
+curl -X POST -H "Authorization: Bearer $MT5_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"symbols": ["EURUSD", "GBPUSD", "XAUUSD"]}' \
+  "$MT5_API_URL/symbols/import"
+```
+
+```json
+{"imported": 3, "cached": 3, "complete": false}
+```
+
+Each import is merged into the terminal's existing cache (a cache past
+`symbol_cache_max_age` counts as empty). The INI builder only skips
+`symbol_suffix` for a symbol when the cache is **complete**, because only the
+broker's full book can show that `EURUSD.i` does not exist. A partial list such
+as the one above is stored but never changes a remap. To make the cache
+complete, send the full book with `"complete": true`, which replaces the cache
+instead of merging:
+
+```bash
+curl -s "$LIVE_MT5_API_URL/symbols" \
+  | jq '{symbols: ., complete: true}' \
+  | curl -X POST -H "Authorization: Bearer $MT5_API_TOKEN" \
+      -H 'Content-Type: application/json' --data-binary @- \
+      "$MT5_API_URL/symbols/import"
+```
+
+An unfiltered `GET /symbols` on a `mode: live` terminal writes a complete cache
+itself. `symbol_cache_max_age` (default `7d`) takes seconds as a bare number or
+a duration with `d`/`h`/`m`/`s` units.
+
+The body is bounded on three axes, each configurable at the top level of
+`config/config.yaml` or under the same name uppercased in the environment:
+
+| Setting | Default | Enforced |
+| ------- | ------- | -------- |
+| `symbol_import_max_body_bytes` | `2097152` (2 MiB) | `413` from the declared `Content-Length`, before the body is parsed. A request with no `Content-Length` at all (chunked) is refused with `411`. |
+| `symbol_import_max_symbols` | `20000` | `400` — entries in `symbols`, counted before deduplication. |
+| `symbol_import_max_symbol_length` | `64` | `400` — characters per symbol, measured on the whitespace-stripped name. |
+
+The defaults sit far above any real broker book — the widest seen in this fleet
+is 841 symbols, and MT5 itself caps a symbol name at 31 characters — so they
+only fire on input that was never going to be a usable symbol list. Nothing is
+written to the cache when a request is refused. Zero, a negative or a
+non-integer setting falls back to the default with a warning; there is no value
+that turns a cap off.
 
 **GET `/symbols/:symbol`** — full symbol info:
 
