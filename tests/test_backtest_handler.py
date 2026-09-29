@@ -475,3 +475,28 @@ def test_build_ini_requires_json(client):
     c, _ = client
     resp = c.post("/backtest/build-ini", data="not json", content_type="text/plain")
     assert resp.status_code == 400
+
+
+# ── Tester-process matching ─────────────────────────────────────────
+
+
+def test_in_terminal_dir_matches_the_resolved_path_of_a_linked_terminal_dir(monkeypatch, tmp_path):
+    # In the VM, Desktop\Shared links to \\host.lan\Data and Windows reports a
+    # process's exe by the resolved path, never by the link it was launched as.
+    real = tmp_path / "host-data" / "terminals" / "metaquotes" / "demo" / "h"
+    real.mkdir(parents=True)
+    link = tmp_path / "Shared"
+    link.symlink_to(tmp_path / "host-data")
+    monkeypatch.setattr(handler, "TERMINAL_DIR", str(link / "terminals" / "metaquotes" / "demo" / "h"))
+
+    assert handler._in_terminal_dir(str(real / "terminal64.exe"))
+    assert handler._in_terminal_dir(str(link / "terminals" / "metaquotes" / "demo" / "h" / "terminal64.exe"))
+
+
+def test_in_terminal_dir_never_matches_a_sibling_through_the_resolved_path(monkeypatch, tmp_path):
+    (tmp_path / "host-data" / "terminals" / "demo" / "a").mkdir(parents=True)
+    (tmp_path / "Shared").symlink_to(tmp_path / "host-data")
+    monkeypatch.setattr(handler, "TERMINAL_DIR", str(tmp_path / "Shared" / "terminals" / "demo" / "a"))
+
+    assert not handler._in_terminal_dir(str(tmp_path / "host-data" / "terminals" / "demo" / "a2" / "terminal64.exe"))
+    assert not handler._in_terminal_dir("")
