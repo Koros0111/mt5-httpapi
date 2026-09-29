@@ -500,3 +500,33 @@ def test_in_terminal_dir_never_matches_a_sibling_through_the_resolved_path(monke
 
     assert not handler._in_terminal_dir(str(tmp_path / "host-data" / "terminals" / "demo" / "a2" / "terminal64.exe"))
     assert not handler._in_terminal_dir("")
+
+
+def test_in_terminal_dir_picks_up_a_link_that_resolves_after_the_first_lookup(monkeypatch, tmp_path):
+    # The share can be unreachable when the first lookup runs, in which case
+    # realpath() hands back the configured path. That miss must not be cached.
+    monkeypatch.setattr(handler, "_resolved_terminal_dir_forms", {})
+    terminal_dir = str(tmp_path / "Shared" / "terminals" / "demo" / "h")
+    resolved_dir = str(tmp_path / "host-data" / "terminals" / "demo" / "h")
+    resolved_exe = os.path.join(resolved_dir, "terminal64.exe")
+    monkeypatch.setattr(handler, "TERMINAL_DIR", terminal_dir)
+
+    monkeypatch.setattr(os.path, "realpath", lambda path: path)
+    assert not handler._in_terminal_dir(resolved_exe)
+
+    monkeypatch.setattr(os.path, "realpath", lambda path: resolved_dir)
+    assert handler._in_terminal_dir(resolved_exe)
+
+
+def test_in_terminal_dir_still_matches_the_configured_path_when_resolving_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(handler, "_resolved_terminal_dir_forms", {})
+    terminal_dir = str(tmp_path / "Shared" / "terminals" / "demo" / "h")
+    monkeypatch.setattr(handler, "TERMINAL_DIR", terminal_dir)
+
+    def _unresolvable(path):
+        raise OSError("share not reachable")
+
+    monkeypatch.setattr(os.path, "realpath", _unresolvable)
+
+    assert handler._in_terminal_dir(os.path.join(terminal_dir, "terminal64.exe"))
+    assert not handler._in_terminal_dir(str(tmp_path / "elsewhere" / "terminal64.exe"))

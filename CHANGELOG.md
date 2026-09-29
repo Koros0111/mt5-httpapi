@@ -8,6 +8,16 @@ The project follows [Semantic Versioning](https://semver.org/): patch = bug fixe
 
 ## [Unreleased]
 
+## [v4.13.2]: 2026-09-29
+
+### Fixed
+
+- Backtest tester processes are now recognised inside the Windows VM. There, `Desktop\Shared` is a link to `\\host.lan\Data`, and Windows reports a process's executable by the resolved path, so matching only the configured `C:\Users\Docker\Desktop\Shared\...` path found nothing. The self-relaunch wait never saw the replacement terminal, so those jobs failed as `Report not generated` while the run carried on, and the timeout and startup cleanups killed nothing, leaving `metatester64.exe` agents holding their ports. The resolved path now matches too, and a sibling directory still never does. Contributed by @Marinski in #22.
+
+  After upgrading, the timeout and startup cleanups actually stop this terminal's `terminal64.exe` and `metatester64.exe` processes, which they silently skipped before.
+
+- The resolved terminal path is cached only once the link actually resolves. A lookup made while the share is still unreachable no longer hides the resolved path until the API restarts, and a failed lookup is logged instead of ignored.
+
 ## [v4.13.1]: 2026-09-10
 
 ### Changed

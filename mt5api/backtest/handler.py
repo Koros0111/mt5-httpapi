@@ -15,7 +15,6 @@ Run flow:
 from __future__ import annotations
 
 import configparser
-import functools
 import io
 import json
 import os
@@ -310,7 +309,12 @@ def _normalize_path(path):
     return path.replace("\\", "/").lower().rstrip("/")
 
 
-@functools.lru_cache(maxsize=8)
+#: Resolved spellings per terminal dir. Only a link that actually resolved is
+#: stored: if the share is not reachable yet, realpath() returns the configured
+#: path unchanged, and caching that would hide the resolved form until restart.
+_resolved_terminal_dir_forms = {}
+
+
 def _terminal_dir_forms(terminal_dir):
     """Every spelling of ``terminal_dir`` a process's exe path can come back as.
 
@@ -321,12 +325,25 @@ def _terminal_dir_forms(terminal_dir):
     found nothing: the self-relaunch wait never fired and the timeout and
     startup cleanups killed nothing.
     """
-    forms = {_normalize_path(terminal_dir)}
+    cached = _resolved_terminal_dir_forms.get(terminal_dir)
+    if cached is not None:
+        return cached
+
+    configured = _normalize_path(terminal_dir)
     try:
-        forms.add(_normalize_path(os.path.realpath(terminal_dir)))
-    except (OSError, ValueError):
-        pass
-    return frozenset(forms)
+        resolved = _normalize_path(os.path.realpath(terminal_dir))
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "terminal dir resolve failed, matching the configured path only dir=%s err=%s",
+            terminal_dir,
+            exc,
+        )
+        return frozenset({configured})
+
+    forms = frozenset({configured, resolved})
+    if resolved != configured:
+        _resolved_terminal_dir_forms[terminal_dir] = forms
+    return forms
 
 
 def _in_terminal_dir(exe):
