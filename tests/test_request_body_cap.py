@@ -109,3 +109,31 @@ def test_the_endpoint_cap_still_wins_where_one_is_tighter():
 
     assert resp.status_code == 413
     assert "SYMBOL_IMPORT_MAX_BODY_BYTES" in resp.get_json()["error"]
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "off"])
+def test_an_invalid_body_cap_still_accepts_a_normal_order(monkeypatch, bad):
+    """MAX_REQUEST_BODY_BYTES=0 is what someone switching the cap off would
+    set. It used to become a one-byte limit that refused every order; it now
+    falls back to the default, so an ordinary order body gets through."""
+    from mt5api import server
+
+    monkeypatch.setenv("MAX_REQUEST_BODY_BYTES", bad)
+    limit = config._positive_int_setting(
+        "MAX_REQUEST_BODY_BYTES", "max_request_body_bytes", 4 * 1024 * 1024
+    )
+    monkeypatch.setattr(server, "MAX_REQUEST_BODY_BYTES", limit)
+    # Stand in for the order handler: the question is only whether the body
+    # gets past the cap, not what the stubbed MT5 SDK does with it.
+    adapter = app.url_map.bind("localhost")
+    endpoint, _ = adapter.match("/orders", method="POST")
+    monkeypatch.setitem(app.view_functions, endpoint, lambda **_: ("placed", 201))
+
+    resp = _send(
+        "POST",
+        "/orders",
+        b'{"symbol": "EURUSD", "type": "BUY", "volume": 0.01}',
+    )
+
+    assert limit == 4 * 1024 * 1024
+    assert resp.status_code == 201

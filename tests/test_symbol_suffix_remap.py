@@ -10,6 +10,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import time as _time
 
 import pytest
 
@@ -69,7 +70,7 @@ def test_no_suffix_configured_leaves_symbol_alone(terminal_dir, monkeypatch):
 
 def test_already_suffixed_symbol_is_not_double_suffixed(terminal_dir, monkeypatch):
     _configure(monkeypatch, ".i")
-    symbol_cache.save(str(terminal_dir), ["EURUSD.i"])
+    symbol_cache.save(str(terminal_dir), ["EURUSD.i"], complete=True)
     assert _remap("EURUSD.i") == "EURUSD.i"
 
 
@@ -79,16 +80,36 @@ def test_already_suffixed_symbol_is_not_double_suffixed(terminal_dir, monkeypatc
 def test_bare_only_symbol_keeps_its_name(terminal_dir, monkeypatch):
     """Eightcap: XAUUSD exists, XAUUSD.i does not — appending invents a symbol."""
     _configure(monkeypatch, ".i")
-    symbol_cache.save(str(terminal_dir), ["EURUSD.i", "XAUUSD", "ASX200", "BTCUSD"])
+    symbol_cache.save(str(terminal_dir), ["EURUSD.i", "XAUUSD", "ASX200", "BTCUSD"], complete=True)
     assert _remap("XAUUSD") == "XAUUSD"
     assert _remap("ASX200") == "ASX200"
     assert _remap("BTCUSD") == "BTCUSD"
 
 
+def test_an_incomplete_cache_never_suppresses_the_suffix(terminal_dir, monkeypatch):
+    """A partial list cannot show the broker lacks EURUSD.i, so it has no say."""
+    _configure(monkeypatch, ".i")
+    symbol_cache.save(str(terminal_dir), ["EURUSD", "XAUUSD"], complete=False)
+    assert _remap("EURUSD") == "EURUSD.i"
+    assert _remap("XAUUSD") == "XAUUSD.i"
+
+
+def test_a_cache_without_a_completeness_flag_is_treated_as_partial(terminal_dir, monkeypatch):
+    _configure(monkeypatch, ".i")
+    symbol_cache.save(str(terminal_dir), ["XAUUSD"], complete=True)
+    path = symbol_cache.cache_path(str(terminal_dir))
+    with open(path) as fh:
+        payload = json.load(fh)
+    del payload["complete"]
+    with open(path, "w") as fh:
+        json.dump(payload, fh)
+    assert _remap("XAUUSD") == "XAUUSD.i"
+
+
 def test_suffixed_symbol_is_still_remapped(terminal_dir, monkeypatch):
     """Eightcap: EURUSD does not exist, EURUSD.i does."""
     _configure(monkeypatch, ".i")
-    symbol_cache.save(str(terminal_dir), ["EURUSD.i", "XAUUSD"])
+    symbol_cache.save(str(terminal_dir), ["EURUSD.i", "XAUUSD"], complete=True)
     assert _remap("EURUSD") == "EURUSD.i"
 
 
@@ -98,14 +119,14 @@ def test_suffix_wins_when_broker_carries_both_forms(terminal_dir, monkeypatch):
     suffixed form to be ABSENT, not merely the bare form to be present."""
     _configure(monkeypatch, "p")
     monkeypatch.setattr(handler, "BROKER", "blackbull")
-    symbol_cache.save(str(terminal_dir), ["AUDUSD", "AUDUSDp", "XAUUSD"])
+    symbol_cache.save(str(terminal_dir), ["AUDUSD", "AUDUSDp", "XAUUSD"], complete=True)
     assert _remap("AUDUSD") == "AUDUSDp"
 
 
 def test_unknown_symbol_falls_back_to_appending(terminal_dir, monkeypatch):
     """Neither form cached — a stale cache must not block a valid new listing."""
     _configure(monkeypatch, ".i")
-    symbol_cache.save(str(terminal_dir), ["EURUSD.i", "XAUUSD"])
+    symbol_cache.save(str(terminal_dir), ["EURUSD.i", "XAUUSD"], complete=True)
     assert _remap("NEWPAIR") == "NEWPAIR.i"
 
 
@@ -119,7 +140,7 @@ def test_empty_symbol_is_left_alone(terminal_dir, monkeypatch):
 
 def test_save_then_load_roundtrips(tmp_path):
     d = str(tmp_path)
-    assert symbol_cache.save(d, ["EURUSD.i", "XAUUSD"]) is True
+    assert symbol_cache.save(d, ["EURUSD.i", "XAUUSD"], complete=True) is True
     assert symbol_cache.load(d) == {"EURUSD.i", "XAUUSD"}
 
 
@@ -130,32 +151,31 @@ def test_load_returns_none_when_absent(tmp_path):
 def test_save_refuses_an_empty_list(tmp_path):
     """An empty write would turn 'unknown' into 'nothing exists' and suppress
     every remap."""
-    assert symbol_cache.save(str(tmp_path), []) is False
+    assert symbol_cache.save(str(tmp_path), [], complete=True) is False
     assert symbol_cache.load(str(tmp_path)) is None
 
 
 def test_save_leaves_no_temp_files_behind(tmp_path):
     d = str(tmp_path)
-    symbol_cache.save(d, ["EURUSD.i"])
+    symbol_cache.save(d, ["EURUSD.i"], complete=True)
     leftovers = [n for n in os.listdir(d) if n.endswith(".tmp")]
     assert leftovers == []
 
 
 def test_save_is_atomic_over_an_existing_cache(tmp_path):
     d = str(tmp_path)
-    symbol_cache.save(d, ["OLD"])
-    symbol_cache.save(d, ["NEW1", "NEW2"])
+    symbol_cache.save(d, ["OLD"], complete=True)
+    symbol_cache.save(d, ["NEW1", "NEW2"], complete=True)
     assert symbol_cache.load(d) == {"NEW1", "NEW2"}
 
 
 def test_cache_records_when_it_was_written(tmp_path):
     d = str(tmp_path)
-    symbol_cache.save(d, ["EURUSD.i"])
+    symbol_cache.save(d, ["EURUSD.i"], complete=True)
     with open(symbol_cache.cache_path(d)) as fh:
         payload = json.load(fh)
     assert isinstance(payload["updated"], int)
-    assert symbol_cache.age_seconds(d) is not None
-    assert symbol_cache.age_seconds(d) < 5
+    assert 0 <= _time.time() - payload["updated"] < 5
 
 
 # ── Staleness: the cache must not be authoritative forever ───────────
@@ -173,17 +193,16 @@ def _age_cache(d, updated):
 
 def test_a_stale_cache_is_no_cache(tmp_path):
     """load() itself enforces the age. Enforcing it anywhere else means a
-    caller can forget to, which is exactly what production did: age_seconds()
-    existed and nothing called it."""
+    caller can forget to."""
     d = str(tmp_path)
-    symbol_cache.save(d, ["XAUUSD"])
+    symbol_cache.save(d, ["XAUUSD"], complete=True)
     _age_cache(d, 1)  # epoch: ~1.7 billion seconds old
     assert symbol_cache.load(d) is None
 
 
 def test_a_cache_missing_its_timestamp_is_no_cache(tmp_path):
     d = str(tmp_path)
-    symbol_cache.save(d, ["XAUUSD"])
+    symbol_cache.save(d, ["XAUUSD"], complete=True)
     path = symbol_cache.cache_path(d)
     with open(path) as fh:
         payload = json.load(fh)
@@ -196,21 +215,21 @@ def test_a_cache_missing_its_timestamp_is_no_cache(tmp_path):
 @pytest.mark.parametrize("updated", ["yesterday", None, -5, 0, 3.7, True])
 def test_a_cache_with_a_malformed_timestamp_is_no_cache(tmp_path, updated):
     d = str(tmp_path)
-    symbol_cache.save(d, ["XAUUSD"])
+    symbol_cache.save(d, ["XAUUSD"], complete=True)
     _age_cache(d, updated)
     assert symbol_cache.load(d) is None
 
 
 def test_a_cache_within_the_window_is_served(tmp_path):
     d = str(tmp_path)
-    symbol_cache.save(d, ["XAUUSD"])
+    symbol_cache.save(d, ["XAUUSD"], complete=True)
     assert symbol_cache.load(d) == {"XAUUSD"}
 
 
 def test_the_age_limit_is_configurable_per_call(tmp_path, monkeypatch):
     import time as _time
     d = str(tmp_path)
-    symbol_cache.save(d, ["XAUUSD"])
+    symbol_cache.save(d, ["XAUUSD"], complete=True)
     _age_cache(d, int(_time.time()) - 120)
     assert symbol_cache.load(d, max_age_seconds=60) is None
     assert symbol_cache.load(d, max_age_seconds=3600) == {"XAUUSD"}
@@ -224,7 +243,7 @@ def test_a_stale_bare_symbol_cache_falls_back_to_the_suffix(
     the remap — the broker may have moved the symbol since. Stale means the
     conservative append-always fallback, same as no cache at all."""
     _configure(monkeypatch, ".i")
-    symbol_cache.save(str(terminal_dir), ["XAUUSD"])
+    symbol_cache.save(str(terminal_dir), ["XAUUSD"], complete=True)
 
     # Fresh cache first, proving the suppression is live and the staleness is
     # what flips it — not some other reason to append.

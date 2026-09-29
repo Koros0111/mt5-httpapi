@@ -41,6 +41,15 @@ def _client():
     return app.test_client()
 
 
+def _cached(terminal_dir):
+    """The names in the cache file, complete or not; None when nothing was written."""
+    try:
+        with open(symbol_cache.cache_path(terminal_dir), encoding="utf-8") as handle:
+            return set(json.load(handle)["symbols"])
+    except FileNotFoundError:
+        return None
+
+
 def test_list_symbols_refused_on_backtest_mode_without_sdk_call(monkeypatch):
     monkeypatch.setattr(h, "MODE", "backtest")
     monkeypatch.setattr(h, "ensure_initialized", _forbidden)
@@ -79,8 +88,8 @@ def test_import_symbols_writes_cache_without_sdk_call(monkeypatch, tmp_path):
     resp = _client().post("/symbols/import", json={"symbols": ["EURUSD", "XAUUSD", "EURUSD"]})
 
     assert resp.status_code == 200
-    assert resp.get_json() == {"imported": 2}
-    assert symbol_cache.load(str(tmp_path)) == {"EURUSD", "XAUUSD"}
+    assert resp.get_json()["imported"] == 2
+    assert _cached(str(tmp_path)) == {"EURUSD", "XAUUSD"}
     h.mt5.initialize.assert_not_called()
     h.mt5.terminal_info.assert_not_called()
 
@@ -94,8 +103,8 @@ def test_import_symbols_strips_stray_whitespace(monkeypatch, tmp_path):
     resp = _client().post("/symbols/import", json={"symbols": [" EURUSD ", "XAUUSD\n", "   "]})
 
     assert resp.status_code == 200
-    assert resp.get_json() == {"imported": 2}
-    assert symbol_cache.load(str(tmp_path)) == {"EURUSD", "XAUUSD"}
+    assert resp.get_json()["imported"] == 2
+    assert _cached(str(tmp_path)) == {"EURUSD", "XAUUSD"}
 
 
 def test_import_symbols_rejects_non_list_body(monkeypatch, tmp_path):
@@ -104,7 +113,7 @@ def test_import_symbols_rejects_non_list_body(monkeypatch, tmp_path):
     resp = _client().post("/symbols/import", json={"symbols": "EURUSD"})
 
     assert resp.status_code == 400
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_rejects_non_string_entries(monkeypatch, tmp_path):
@@ -113,7 +122,7 @@ def test_import_symbols_rejects_non_string_entries(monkeypatch, tmp_path):
     resp = _client().post("/symbols/import", json={"symbols": ["EURUSD", 123]})
 
     assert resp.status_code == 400
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_rejects_empty_list(monkeypatch, tmp_path):
@@ -122,7 +131,7 @@ def test_import_symbols_rejects_empty_list(monkeypatch, tmp_path):
     resp = _client().post("/symbols/import", json={"symbols": []})
 
     assert resp.status_code == 400
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_rejects_missing_body(monkeypatch, tmp_path):
@@ -131,7 +140,7 @@ def test_import_symbols_rejects_missing_body(monkeypatch, tmp_path):
     resp = _client().post("/symbols/import", json={})
 
     assert resp.status_code == 400
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_rejects_bare_json_array_body(monkeypatch, tmp_path):
@@ -146,7 +155,7 @@ def test_import_symbols_rejects_bare_json_array_body(monkeypatch, tmp_path):
     assert resp.status_code == 400
     body = resp.get_json()
     assert body is not None and "error" in body
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_rejects_bare_json_scalar_body(monkeypatch, tmp_path):
@@ -155,7 +164,7 @@ def test_import_symbols_rejects_bare_json_scalar_body(monkeypatch, tmp_path):
     resp = _client().post("/symbols/import", json=42)
 
     assert resp.status_code == 400
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_rejects_no_body_at_all(monkeypatch, tmp_path):
@@ -164,7 +173,7 @@ def test_import_symbols_rejects_no_body_at_all(monkeypatch, tmp_path):
     resp = _client().post("/symbols/import")
 
     assert resp.status_code == 400
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 # ── The refusal must not queue behind the global MT5 lock ────────────
@@ -258,17 +267,28 @@ def test_documented_backtest_priming_workflow_primes_the_suffix_decision(
     monkeypatch.setattr(h, "MODE", "backtest")
     monkeypatch.setattr(h, "ensure_initialized", _forbidden)
     assert client.get("/symbols").status_code == 409
-    assert symbol_cache.load(str(terminal)) is None
+    assert _cached(str(terminal)) is None
 
-    # Step 2: prime with the documented POST body instead.
+    # Step 2: the documented partial example is stored, but cannot show the
+    # broker lacks anything, so the suffix is still appended everywhere.
     resp = client.post(
         "/symbols/import",
-        json={"symbols": ["EURUSD.i", "GBPUSD.i", "XAUUSD"]},
+        json={"symbols": ["EURUSD", "GBPUSD", "XAUUSD"]},
     )
     assert resp.status_code == 200
-    assert resp.get_json() == {"imported": 3}
+    assert resp.get_json() == {"imported": 3, "cached": 3, "complete": False}
+    assert _tester_symbol("XAUUSD") == "XAUUSD.i"
+    assert _tester_symbol("EURUSD") == "EURUSD.i"
 
-    # Step 3: the builder now reads that cache. XAUUSD is carried bare and not
+    # Step 3: the broker's full book, marked complete, replaces the cache.
+    resp = client.post(
+        "/symbols/import",
+        json={"symbols": ["EURUSD.i", "GBPUSD.i", "XAUUSD"], "complete": True},
+    )
+    assert resp.status_code == 200
+    assert resp.get_json() == {"imported": 3, "cached": 3, "complete": True}
+
+    # Step 4: the builder now reads that cache. XAUUSD is carried bare and not
     # suffixed, so it keeps its name; EURUSD is suffix-only and still remaps.
     assert _tester_symbol("XAUUSD") == "XAUUSD"
     assert _tester_symbol("EURUSD") == "EURUSD.i"
@@ -310,8 +330,8 @@ def test_import_symbols_accepts_a_body_exactly_at_the_byte_cap(monkeypatch, tmp_
     )
 
     assert resp.status_code == 200
-    assert resp.get_json() == {"imported": 2}
-    assert symbol_cache.load(str(tmp_path)) == {"EURUSD", "XAUUSD"}
+    assert resp.get_json()["imported"] == 2
+    assert _cached(str(tmp_path)) == {"EURUSD", "XAUUSD"}
 
 
 def test_import_symbols_rejects_a_body_one_byte_over_the_cap(monkeypatch, tmp_path):
@@ -326,7 +346,7 @@ def test_import_symbols_rejects_a_body_one_byte_over_the_cap(monkeypatch, tmp_pa
     assert resp.status_code == 413
     body = resp.get_json()
     assert body is not None and "SYMBOL_IMPORT_MAX_BODY_BYTES" in body["error"]
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_rejects_an_oversized_body_before_parsing_it(
@@ -356,7 +376,7 @@ def test_import_symbols_rejects_an_oversized_body_before_parsing_it(
         f"expected 413, got {resp.status_code} -- the body cap ran after "
         "get_json() instead of before it"
     )
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_refuses_a_body_with_no_declared_length(monkeypatch, tmp_path):
@@ -376,7 +396,7 @@ def test_import_symbols_refuses_a_body_with_no_declared_length(monkeypatch, tmp_
     )
 
     assert resp.status_code == 411
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_accepts_the_maximum_entry_count(monkeypatch, tmp_path):
@@ -388,7 +408,7 @@ def test_import_symbols_accepts_the_maximum_entry_count(monkeypatch, tmp_path):
     )
 
     assert resp.status_code == 200
-    assert resp.get_json() == {"imported": 5}
+    assert resp.get_json()["imported"] == 5
 
 
 def test_import_symbols_rejects_one_entry_over_the_maximum(monkeypatch, tmp_path):
@@ -402,7 +422,7 @@ def test_import_symbols_rejects_one_entry_over_the_maximum(monkeypatch, tmp_path
     assert resp.status_code == 400
     body = resp.get_json()
     assert body is not None and "SYMBOL_IMPORT_MAX_SYMBOLS" in body["error"]
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_entry_count_is_measured_before_deduplication(monkeypatch, tmp_path):
@@ -418,7 +438,7 @@ def test_entry_count_is_measured_before_deduplication(monkeypatch, tmp_path):
     resp = _client().post("/symbols/import", json={"symbols": ["EURUSD"] * 6})
 
     assert resp.status_code == 400
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_import_symbols_accepts_a_symbol_exactly_at_the_length_cap(
@@ -430,7 +450,7 @@ def test_import_symbols_accepts_a_symbol_exactly_at_the_length_cap(
     resp = _client().post("/symbols/import", json={"symbols": ["E" * 8]})
 
     assert resp.status_code == 200
-    assert symbol_cache.load(str(tmp_path)) == {"E" * 8}
+    assert _cached(str(tmp_path)) == {"E" * 8}
 
 
 def test_import_symbols_rejects_a_symbol_one_character_over_the_cap(
@@ -447,7 +467,7 @@ def test_import_symbols_rejects_a_symbol_one_character_over_the_cap(
     # Nothing is persisted: one bad name rejects the whole import rather than
     # silently caching a partial book, which the INI builder would read as the
     # broker's complete symbol list.
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_symbol_length_is_measured_after_whitespace_is_stripped(monkeypatch, tmp_path):
@@ -461,7 +481,7 @@ def test_symbol_length_is_measured_after_whitespace_is_stripped(monkeypatch, tmp
     resp = _client().post("/symbols/import", json={"symbols": ["   " + "E" * 8 + "  "]})
 
     assert resp.status_code == 200
-    assert symbol_cache.load(str(tmp_path)) == {"E" * 8}
+    assert _cached(str(tmp_path)) == {"E" * 8}
 
 
 def test_the_reported_two_megabyte_symbol_is_refused_at_shipped_defaults(tmp_path, monkeypatch):
@@ -476,7 +496,7 @@ def test_the_reported_two_megabyte_symbol_is_refused_at_shipped_defaults(tmp_pat
     resp = _client().post("/symbols/import", json={"symbols": ["A" * 2_097_153]})
 
     assert resp.status_code == 413
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 def test_a_symbol_under_the_body_cap_but_over_the_length_cap_is_still_refused(
@@ -491,7 +511,7 @@ def test_a_symbol_under_the_body_cap_but_over_the_length_cap_is_still_refused(
     resp = _client().post("/symbols/import", json={"symbols": ["A" * 1024]})
 
     assert resp.status_code == 400
-    assert symbol_cache.load(str(tmp_path)) is None
+    assert _cached(str(tmp_path)) is None
 
 
 # ── The knobs themselves ─────────────────────────────────────────────
@@ -505,16 +525,111 @@ def test_symbol_import_limits_read_the_environment(monkeypatch):
     ) == 123
 
 
-@pytest.mark.parametrize("bad", ["", "abc", "0", "-5", "   "])
-def test_symbol_import_limits_clamp_instead_of_raising(monkeypatch, bad):
-    """config.py is imported by the whole API: a typo in one endpoint's tuning
-    value must not stop trading, and must not disable the only offline path a
-    backtest terminal has for priming its symbol cache either.
-    """
+@pytest.mark.parametrize("bad", ["abc", "0", "-5", "   ", "1.5"])
+def test_an_invalid_limit_falls_back_to_the_default(monkeypatch, bad):
+    """Clamping 0 to 1 used to turn a byte cap into a one-byte limit. An
+    invalid value now means the default, and startup carries on."""
     monkeypatch.setenv("SYMBOL_IMPORT_MAX_SYMBOLS", bad)
 
     value = config._positive_int_setting(
         "SYMBOL_IMPORT_MAX_SYMBOLS", "symbol_import_max_symbols", 20000
     )
 
-    assert value >= 1
+    assert value == 20000
+
+
+# ── Partial imports on a suffixed broker ─────────────────────────────
+
+
+def _suffix(monkeypatch, terminal, suffix=".i"):
+    monkeypatch.setattr(h, "TERMINAL_DIR", str(terminal))
+    monkeypatch.setattr(backtest_handler, "TERMINAL_DIR", str(terminal))
+    monkeypatch.setattr(backtest_handler, "SYMBOL_SUFFIX", suffix)
+    monkeypatch.setattr(backtest_handler, "SYMBOL_SUFFIX_CONFIGURED", True)
+
+
+def test_a_partial_import_does_not_drop_a_suffix_the_broker_needs(monkeypatch, tmp_path):
+    """The review reproduction: symbol_suffix ".i", empty cache, then the
+    documented example posted. The broker only lists EURUSD.i, so EURUSD
+    must still remap to it."""
+    _suffix(monkeypatch, tmp_path)
+    assert _tester_symbol("EURUSD") == "EURUSD.i"
+
+    resp = _client().post(
+        "/symbols/import", json={"symbols": ["EURUSD", "GBPUSD", "XAUUSD"]}
+    )
+
+    assert resp.status_code == 200
+    assert resp.get_json()["complete"] is False
+    assert _tester_symbol("EURUSD") == "EURUSD.i"
+
+
+def test_a_partial_import_merges_into_a_complete_cache(monkeypatch, tmp_path):
+    _suffix(monkeypatch, tmp_path)
+    client = _client()
+    client.post("/symbols/import", json={"symbols": ["EURUSD.i", "XAUUSD"], "complete": True})
+
+    resp = client.post("/symbols/import", json={"symbols": ["ASX200"]})
+
+    assert resp.get_json() == {"imported": 1, "cached": 3, "complete": True}
+    assert _cached(str(tmp_path)) == {"EURUSD.i", "XAUUSD", "ASX200"}
+    assert _tester_symbol("EURUSD") == "EURUSD.i"
+    assert _tester_symbol("XAUUSD") == "XAUUSD"
+    assert _tester_symbol("ASX200") == "ASX200"
+
+
+def test_a_complete_import_replaces_the_cache(monkeypatch, tmp_path):
+    _suffix(monkeypatch, tmp_path)
+    client = _client()
+    client.post("/symbols/import", json={"symbols": ["OLD"], "complete": True})
+
+    resp = client.post("/symbols/import", json={"symbols": ["EURUSD.i"], "complete": True})
+
+    assert resp.get_json() == {"imported": 1, "cached": 1, "complete": True}
+    assert _cached(str(tmp_path)) == {"EURUSD.i"}
+
+
+def test_a_partial_import_does_not_revive_a_stale_cache(monkeypatch, tmp_path):
+    _suffix(monkeypatch, tmp_path)
+    symbol_cache.save(str(tmp_path), ["EURUSD.i", "XAUUSD"], complete=True)
+    path = symbol_cache.cache_path(str(tmp_path))
+    with open(path, encoding="utf-8") as handle:
+        payload = json.load(handle)
+    payload["updated"] = 1
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+
+    resp = _client().post("/symbols/import", json={"symbols": ["GBPUSD.i"]})
+
+    assert resp.get_json() == {"imported": 1, "cached": 1, "complete": False}
+    assert _tester_symbol("XAUUSD") == "XAUUSD.i"
+
+
+@pytest.mark.parametrize("flag", ["yes", 1, None])
+def test_import_symbols_rejects_a_non_boolean_complete(monkeypatch, tmp_path, flag):
+    monkeypatch.setattr(h, "TERMINAL_DIR", str(tmp_path))
+
+    resp = _client().post("/symbols/import", json={"symbols": ["EURUSD"], "complete": flag})
+
+    assert resp.status_code == 400
+    assert _cached(str(tmp_path)) is None
+
+
+# ── symbol_cache_max_age ─────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("604800", 604800), ("3600", 3600), ("7d", 604800), ("12h", 43200), ("90m", 5400)],
+)
+def test_symbol_cache_max_age_reads_bare_numbers_as_seconds(monkeypatch, raw, expected):
+    monkeypatch.setenv("SYMBOL_CACHE_MAX_AGE", raw)
+
+    assert config._symbol_cache_max_age() == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "-1d", "abc", "0d"])
+def test_an_invalid_symbol_cache_max_age_falls_back_to_the_default(monkeypatch, raw):
+    monkeypatch.setenv("SYMBOL_CACHE_MAX_AGE", raw)
+
+    assert config._symbol_cache_max_age() == 7 * 24 * 3600

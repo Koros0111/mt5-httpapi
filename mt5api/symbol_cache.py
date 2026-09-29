@@ -17,11 +17,18 @@ GET /symbols itself calls the SDK (`ensure_initialized()`), so it is refused
 on a `mode: backtest` terminal instead of triggering a full `mt5.initialize()`
 that would spawn `terminal64.exe` and hold the tester's single-instance lock.
 POST /symbols/import (mt5api/handlers/symbols.py) is the safe priming path for
-those terminals: it calls symbol_cache.save() directly from a caller-supplied
-list and never touches mt5.*.
+those terminals: it writes a caller-supplied list and never touches mt5.*.
+
+Only a COMPLETE list can prove a broker lacks a symbol. GET /symbols writes
+the SDK's full listing and marks it complete; an import is merged into the
+existing cache and only marks it complete when the caller says the list is
+the broker's full book (``"complete": true``, which replaces the cache). A
+partial import such as ``["EURUSD", "GBPUSD", "XAUUSD"]`` would otherwise make
+EURUSD look bare-only on a broker that only lists EURUSD.i.
 
 The cache is only ever used to SUPPRESS a remap that would invent a symbol.
-When it is missing, stale or unreadable the builder falls back to appending,
+When it is missing, incomplete, stale or unreadable the builder falls back to
+appending,
 which is the behaviour that shipped before it existed. Staleness is enforced
 in load() itself — a cache older than MAX_AGE_SECONDS, or one without a valid
 ``updated`` stamp, is treated exactly like no cache — so no caller can forget
@@ -49,8 +56,11 @@ def cache_path(terminal_dir):
     return os.path.join(terminal_dir, CACHE_BASENAME)
 
 
-def save(terminal_dir, names):
-    """Persist the broker's full symbol list. Best-effort: never raises.
+def save(terminal_dir, names, complete):
+    """Persist a symbol list. Best-effort: never raises.
+
+    ``complete`` records whether ``names`` is the broker's full book; only a
+    complete list is ever used to decide a symbol does not exist.
 
     Written atomically — the INI builder reads this on every backtest, and a
     torn file would silently degrade every remap decision until overwritten.
@@ -59,7 +69,7 @@ def save(terminal_dir, names):
     if not names:
         return False
     path = cache_path(terminal_dir)
-    payload = {"updated": int(time.time()), "symbols": names}
+    payload = {"updated": int(time.time()), "complete": bool(complete), "symbols": names}
     try:
         os.makedirs(terminal_dir, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=terminal_dir, prefix=".symbols-", suffix=".tmp")
@@ -81,19 +91,48 @@ def save(terminal_dir, names):
     return True
 
 
+def merge(terminal_dir, names, complete):
+    """Add ``names`` to the cache, or replace it when ``complete``.
+
+    A partial list keeps whatever completeness the current cache had: adding
+    names to a full book leaves it a full book, and adding them to nothing
+    (or to a stale cache, which counts as nothing) gives a partial one that
+    load() will not use. Returns (saved, symbol_count, complete).
+    """
+    merged = set(names)
+    if not complete:
+        current = _read(terminal_dir)
+        if current is not None:
+            merged |= current[0]
+            complete = current[1]
+    ok = save(terminal_dir, merged, complete)
+    return ok, len(merged), bool(complete)
+
+
 def load(terminal_dir, max_age_seconds=None):
     """Return the cached symbol set, or None when there is no usable cache.
 
     None means "no opinion" — callers must treat it as unknown, not empty.
+    A cache that is not marked complete is not usable: a partial list cannot
+    show that the broker lacks a symbol.
+    """
+    current = _read(terminal_dir, max_age_seconds)
+    if current is None or not current[1]:
+        return None
+    return current[0]
+
+
+def _read(terminal_dir, max_age_seconds=None):
+    """Return (symbols, complete) from a current cache, or None.
 
     A cache past ``max_age_seconds`` (default: MAX_AGE_SECONDS) is unusable,
     and so is one whose ``updated`` stamp is missing or malformed. This is
     what keeps the cache from being AUTHORITATIVE forever: a broker that
     moves a symbol between bare and suffixed would otherwise keep being
-    normalized against a years-old list until someone happened to call
-    GET /symbols. Stale degrades to the append-always fallback — the
-    conservative behaviour that shipped before the cache existed — never to
-    a wrong answer presented as a current one.
+    normalized against a years-old list until someone happened to refresh it.
+    Stale degrades to the append-always fallback — the conservative behaviour
+    that shipped before the cache existed — never to a wrong answer presented
+    as a current one.
     """
     limit = MAX_AGE_SECONDS if max_age_seconds is None else max_age_seconds
     path = cache_path(terminal_dir)
@@ -130,16 +169,5 @@ def load(terminal_dir, max_age_seconds=None):
     if not isinstance(symbols, list) or not symbols:
         log.warning("symbol cache at %s has no symbols list", path)
         return None
-    return {str(s) for s in symbols}
+    return {str(s) for s in symbols}, payload.get("complete") is True
 
-
-def age_seconds(terminal_dir):
-    """Seconds since the cache was written, or None when absent/unreadable."""
-    path = cache_path(terminal_dir)
-    try:
-        with open(path, encoding="utf-8") as handle:
-            payload = json.load(handle)
-        updated = int(payload["updated"])
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-    return max(0, int(time.time()) - updated)

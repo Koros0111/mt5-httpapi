@@ -1,4 +1,5 @@
 import argparse
+import logging
 import math
 import os
 import re
@@ -251,13 +252,20 @@ _MODE_RAW = (_args.mode or _terminal_config.get("mode") or os.environ.get("MT5_M
 MODE = str(_MODE_RAW).strip().lower() or "live"
 if MODE not in ("live", "backtest"):
     MODE = "live"
+def _setting_warning(msg, *args):
+    # mt5api.logger imports this module, so it cannot be used here yet.
+    # Nothing has configured logging this early, so logging's last-resort
+    # handler prints the warning to stderr, which is the API's own log.
+    logging.getLogger("mt5api.config").warning(msg, *args)
+
+
 def _symbol_cache_max_age():
     """Finite trust window for the persisted broker symbol list, in seconds.
 
-    Clamped rather than raised on a bad value - config.py is imported by the
-    whole API, and a typo here must not stop trading. The floor keeps "0" or a
-    negative from making every cache read stale and silently re-enabling the
-    append-always behaviour the cache exists to fix.
+    A bare number is seconds (604800 = one week); a string may carry units
+    ("7d", "12h", "90m"). Zero, a negative or an unparseable value falls back
+    to the default with a warning instead of stopping startup, since config.py
+    is imported by the whole API.
     """
     raw = os.environ.get("SYMBOL_CACHE_MAX_AGE") or load_yaml_config().get(
         "symbol_cache_max_age"
@@ -265,24 +273,32 @@ def _symbol_cache_max_age():
     default = 7 * 24 * 3600
     if raw in (None, ""):
         return default
+    text = str(raw).strip()
     try:
-        parsed = parse_duration_to_seconds(raw)
+        # parse_duration_to_seconds reads a bare number as hours, which suits
+        # broker offsets but not a cache lifetime, so bare numbers stop here.
+        parsed = int(text) if re.fullmatch(r"[+-]?\d+", text) else parse_duration_to_seconds(text)
     except (TypeError, ValueError):
+        parsed = None
+    if parsed is None or parsed <= 0:
+        _setting_warning(
+            "symbol_cache_max_age=%r is not a positive duration "
+            "(seconds, or e.g. '7d'); using the default %ds", raw, default,
+        )
         return default
-    return max(60, parsed or default)
+    return parsed
 
 
 SYMBOL_CACHE_MAX_AGE_SECONDS = _symbol_cache_max_age()
 
 
 def _positive_int_setting(env_name, yaml_key, default):
-    """A positive integer setting, clamped rather than raised on a bad value.
+    """A positive integer setting; anything else falls back to the default.
 
-    Same call as every other numeric setting in this module: config.py is
-    imported by the whole API, so a typo in one endpoint's tuning value must
-    not stop trading and backtesting. The floor keeps a bad value (0, a
-    negative, "none") from silently disabling /symbols/import outright, which
-    is the only way to prime a mode: backtest terminal's symbol cache.
+    Zero, a negative or a non-integer is logged and replaced by the default
+    rather than clamped: clamping 0 to 1 turned a byte cap into a one-byte
+    limit that refused every request. Nor does it stop startup, since
+    config.py is imported by the whole API.
 
     Environment overrides the top-level config.yaml key, matching
     _symbol_cache_max_age above.
@@ -293,8 +309,14 @@ def _positive_int_setting(env_name, yaml_key, default):
     try:
         value = int(str(raw).strip())
     except (TypeError, ValueError):
+        value = None
+    if value is None or value < 1:
+        _setting_warning(
+            "%s=%r is not a positive integer; using the default %d",
+            env_name, raw, default,
+        )
         return default
-    return max(1, value)
+    return value
 
 
 # Per-request caps for POST /symbols/import. Without them one authenticated

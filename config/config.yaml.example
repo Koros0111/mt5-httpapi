@@ -88,6 +88,13 @@ accounts:
 #       -d '{"symbols": ["EURUSD", "GBPUSD", "XAUUSD"]}' \
 #       http://127.0.0.1:8888/<broker>/<account>/symbols/import
 #
+#   Each import is MERGED into the cache. A partial list like the one above
+#   adds names but never lets the suffix be skipped: only a complete list can
+#   show the broker lacks EURUSD.i. To enable skipping, send the broker's
+#   FULL book with "complete": true, which replaces the cache:
+#
+#       -d '{"symbols": [...every symbol...], "complete": true}'
+#
 #   Source that list from a live terminal on the SAME broker/account —
 #   `curl $MT5_API_URL/symbols` against it returns exactly the JSON array
 #   this endpoint accepts under the "symbols" key — or from the broker's own
@@ -102,13 +109,16 @@ accounts:
 # symbol_cache_max_age is read at the TOP LEVEL of this file, not per
 # terminal — it applies to every terminal. Uncomment it here, at the same
 # indentation as `terminals:` below; setting it inside a terminal entry is
-# silently ignored.
+# silently ignored. A bare number is seconds (604800 = 7 days); a string may
+# use d/h/m/s units. Zero, a negative or anything unparseable falls back to
+# the default with a warning in the API log.
 # symbol_cache_max_age: "7d"
 
 # Per-request caps on POST /symbols/import. Also read at the TOP LEVEL, and
-# also settable in the environment under the uppercase name. Each is clamped to
-# a minimum of 1 rather than raising, so a typo here cannot take the only
-# priming path a backtest terminal has offline.
+# also settable in the environment under the uppercase name. Zero, a negative
+# or a non-integer falls back to the default with a warning in the API log,
+# so a typo here cannot take the only priming path a backtest terminal has
+# offline.
 #
 # symbol_import_max_body_bytes (default 2097152, 2 MiB) — an oversized body is
 #   refused with 413 from its declared Content-Length, before any of it is
@@ -134,7 +144,9 @@ accounts:
 # that one, because it is checked inside the handler.
 #
 # Both are refused with 413 from the declared Content-Length, before the body
-# is parsed, and both take the uppercase name in the environment.
+# is parsed, and both take the uppercase name in the environment. There is no
+# "off" value: zero, a negative or a non-integer falls back to the default
+# with a warning.
 #
 # max_request_body_bytes (default 4194304, 4 MiB) — everything that is not a
 #   file upload. Well above the largest legitimate JSON this API takes.

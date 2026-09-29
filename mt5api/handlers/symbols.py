@@ -126,7 +126,7 @@ def _list_symbols_live():
     # decide a symbol does not exist, and a group-filtered subset would make it
     # draw that conclusion about every symbol the filter excluded.
     if not group and names:
-        symbol_cache.save(TERMINAL_DIR, names)
+        symbol_cache.save(TERMINAL_DIR, names, complete=True)
     return jsonify(names)
 
 
@@ -138,6 +138,10 @@ def import_symbols():
     request (see list_symbols above). Feed it a symbol list sourced elsewhere
     — GET /symbols against a live terminal on the same broker/account, or the
     broker's own symbol documentation.
+
+    The list is merged into the existing cache. Only ``"complete": true``,
+    which says the list is the broker's full book, replaces the cache and
+    lets the INI builder treat a missing suffixed name as absent.
 
     Bounded on three axes, all configurable (see mt5api/config.py) and all
     checked before the resource they bound is spent: the raw body, the number
@@ -188,6 +192,9 @@ def import_symbols():
     names = body.get("symbols")
     if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
         return jsonify({"error": "request body must include a 'symbols' array of strings"}), 400
+    complete = body.get("complete", False)
+    if not isinstance(complete, bool):
+        return jsonify({"error": "'complete' must be true or false"}), 400
     # Counted on the raw array, not the deduplicated result: this bounds the
     # strip/dedupe/sort work below, which happens before any dedupe can shrink
     # the list, and "items in 'symbols'" is what the caller actually sent.
@@ -225,9 +232,10 @@ def import_symbols():
                 f"{max(len(n) for n in too_long)}"
             ),
         }), 400
-    if not symbol_cache.save(TERMINAL_DIR, cleaned):
+    saved, total, is_complete = symbol_cache.merge(TERMINAL_DIR, cleaned, complete)
+    if not saved:
         return jsonify({"error": "failed to write symbol cache"}), 500
-    return jsonify({"imported": len(cleaned)})
+    return jsonify({"imported": len(cleaned), "cached": total, "complete": is_complete})
 
 
 @with_mt5

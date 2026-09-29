@@ -50,8 +50,28 @@ curl -X POST -H "Authorization: Bearer $MT5_API_TOKEN" \
 ```
 
 ```json
-{"imported": 3}
+{"imported": 3, "cached": 3, "complete": false}
 ```
+
+Each import is merged into the terminal's existing cache (a cache past
+`symbol_cache_max_age` counts as empty). The INI builder only skips
+`symbol_suffix` for a symbol when the cache is **complete**, because only the
+broker's full book can show that `EURUSD.i` does not exist. A partial list such
+as the one above is stored but never changes a remap. To make the cache
+complete, send the full book with `"complete": true`, which replaces the cache
+instead of merging:
+
+```bash
+curl -s "$LIVE_MT5_API_URL/symbols" \
+  | jq '{symbols: ., complete: true}' \
+  | curl -X POST -H "Authorization: Bearer $MT5_API_TOKEN" \
+      -H 'Content-Type: application/json' --data-binary @- \
+      "$MT5_API_URL/symbols/import"
+```
+
+An unfiltered `GET /symbols` on a `mode: live` terminal writes a complete cache
+itself. `symbol_cache_max_age` (default `7d`) takes seconds as a bare number or
+a duration with `d`/`h`/`m`/`s` units.
 
 The body is bounded on three axes, each configurable at the top level of
 `config/config.yaml` or under the same name uppercased in the environment:
@@ -65,7 +85,9 @@ The body is bounded on three axes, each configurable at the top level of
 The defaults sit far above any real broker book — the widest seen in this fleet
 is 841 symbols, and MT5 itself caps a symbol name at 31 characters — so they
 only fire on input that was never going to be a usable symbol list. Nothing is
-written to the cache when a request is refused.
+written to the cache when a request is refused. Zero, a negative or a
+non-integer setting falls back to the default with a warning; there is no value
+that turns a cap off.
 
 **GET `/symbols/:symbol`** — full symbol info:
 
